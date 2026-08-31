@@ -1,21 +1,27 @@
 # byo-llm
 
-Deploy an open-source LLM to AWS SageMaker behind an OpenAI-compatible
-`/v1/chat/completions` endpoint, so any app using the OpenAI SDK can point
-`base_url` at it with no other code changes.
+Deploy an open-source LLM to AWS SageMaker behind a Chat Completions-style
+HTTP API (`POST /v1/chat/completions`) that you own end to end -- the model
+runs on your own SageMaker endpoint, not a third-party API.
 
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    base_url="https://<api-id>.execute-api.<region>.amazonaws.com/v1",
-    api_key="unused",  # adapter doesn't check it -- see "Security" below before exposing this
-)
-resp = client.chat.completions.create(
-    model="qwen2.5-14b-awq",
-    messages=[{"role": "user", "content": "hi"}],
-)
 ```
+POST /v1/chat/completions
+{
+  "model": "qwen2.5-14b-awq",
+  "messages": [{"role": "user", "content": "hi"}]
+}
+```
+
+> If your app happens to already be built on the OpenAI SDK, that request/
+> response shape matches what it sends and expects, so pointing `base_url`
+> at your deployment is a drop-in swap with no other code changes:
+> ```python
+> from openai import OpenAI
+> client = OpenAI(base_url="https://<api-id>.execute-api.<region>.amazonaws.com/v1", api_key="unused")
+> resp = client.chat.completions.create(model="qwen2.5-14b-awq", messages=[{"role": "user", "content": "hi"}])
+> ```
+> That's a consequence of matching the wire format, not the point of the
+> project -- see "How it fits together" below for what's actually running.
 
 Built as a **1-week, cost-conscious experiment**, not production infra. That
 shapes several decisions below -- fixed single-instance endpoints (no
@@ -37,8 +43,8 @@ bills per second from `InService` until you delete it.
                                         ▲
                                         │ sagemaker-runtime InvokeEndpoint
                                         │
- OpenAI SDK ──► API Gateway (HTTP API) ─► Lambda (lambda/handler.py) ──┘
-   base_url        POST /v1/chat/completions   translates OpenAI <-> LMI JSON
+ Your app ────► API Gateway (HTTP API) ─► Lambda (lambda/handler.py) ──┘
+   base_url        POST /v1/chat/completions   translates chat request/response <-> LMI JSON
 
  infra/setup_lambda_api.py wires the Lambda + API Gateway (plain boto3, not CDK).
  teardown.py deletes the SageMaker endpoint/config/model. Run it when you're done.
@@ -46,16 +52,36 @@ bills per second from `InService` until you delete it.
 
 ## Setup
 
+### Option A: conda (recommended)
+
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt   # requirements.txt + pytest
+conda env create -f environment.yml
+conda activate byo-llm
 
 cp .env.example .env
 # edit .env: set AWS_REGION and SAGEMAKER_ROLE_ARN (see below)
 ```
 
-Run the unit tests (no AWS needed -- everything's mocked):
+`environment.yml` installs `requirements-dev.txt` (which pulls in
+`requirements.txt` plus `pytest`) via pip inside the conda env, so there's
+one source of truth for versions. To pick up a change to `requirements*.txt`
+later:
+
+```bash
+conda env update -f environment.yml --prune
+```
+
+### Option B: plain venv + pip
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+
+cp .env.example .env
+```
+
+### Either way, run the unit tests (no AWS needed -- everything's mocked)
 
 ```bash
 pytest tests/ -v
@@ -138,7 +164,7 @@ names; run `teardown.py` first if you're redeploying.
 python scripts/test_endpoint_direct.py --model qwen2.5-14b-awq
 ```
 
-### 3. Wire up the OpenAI-compatible adapter
+### 3. Wire up the Chat Completions-style adapter
 
 ```bash
 python infra/setup_lambda_api.py --model qwen2.5-14b-awq
@@ -147,8 +173,8 @@ python infra/setup_lambda_api.py --model qwen2.5-14b-awq
 Creates a narrowly-scoped IAM role (only `sagemaker:InvokeEndpoint` on
 *this* endpoint's ARN, plus its own CloudWatch Logs group), the Lambda
 (`lambda/handler.py`), and an HTTP API route `POST /v1/chat/completions`.
-Prints the URL to use as your OpenAI SDK `base_url`. Safe to re-run --
-updates resources in place rather than duplicating them.
+Prints the URL to use as your `base_url`. Safe to re-run -- updates
+resources in place rather than duplicating them.
 
 ### 4. Test the full path
 
@@ -216,10 +242,10 @@ does.
 with `InvokeMode=RESPONSE_STREAM` + `sagemaker-runtime
 InvokeEndpointWithResponseStream`) and implements + unit-tests the one
 piece that isn't AWS-runtime-version-dependent: translating a single
-streamed LMI chunk into an OpenAI `chat.completion.chunk` SSE line. The
-Lambda response-streaming plumbing itself is sketched but **not wired up or
-deployed** -- see that file's module docstring for exactly what's stubbed
-and why, before building on it.
+streamed LMI chunk into a Chat Completions-style `chat.completion.chunk`
+SSE line. The Lambda response-streaming plumbing itself is sketched but
+**not wired up or deployed** -- see that file's module docstring for
+exactly what's stubbed and why, before building on it.
 
 ## Repo structure
 
@@ -230,7 +256,7 @@ pricing.py                Approximate per-instance-type hourly cost estimates
 deploy.py                 Creates Model + EndpointConfig + Endpoint from models.yaml
 teardown.py                Deletes them, in order, with confirmation + verification
 lambda/
-  handler.py                OpenAI <-> LMI translation + Lambda entrypoint (non-streaming)
+  handler.py                Chat request/response <-> LMI translation + Lambda entrypoint (non-streaming)
   streaming_handler.py       Streaming architecture note/stub (not deployed)
 infra/
   setup_lambda_api.py        Plain-boto3 Lambda + HTTP API Gateway setup (no CDK)
@@ -240,6 +266,8 @@ scripts/
 tests/
   test_teardown.py, test_deploy.py, test_handler.py, test_streaming_handler.py
   -- all mock boto3, no AWS credentials needed to run
+environment.yml           Conda environment (recommended setup path)
+requirements.txt / requirements-dev.txt   Pinned deps (pip, also used by environment.yml)
 ```
 
 ## Ambiguity this repo resolved
@@ -268,7 +296,11 @@ want:
   needs to be reproducible across environments or reviewed as a diff.
 - **CloudWatch alarms** on endpoint latency/error rate.
 - **Auth** on the API Gateway route -- right now anything with the URL can
-  call it; `api_key="unused"` in the OpenAI SDK example above is literal.
-  Add an API Gateway authorizer (API key, JWT, IAM) before exposing this
-  beyond your own machine.
+  call it; `api_key="unused"` in the example above is literal. Add an API
+  Gateway authorizer (API key, JWT, IAM) before exposing this beyond your
+  own machine.
 - **Streaming**, properly wired (see above).
+
+## License
+
+[MIT](LICENSE).

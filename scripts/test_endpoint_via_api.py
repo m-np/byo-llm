@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Hit the deployed adapter through the FULL path: API Gateway -> Lambda ->
-SageMaker. Sends a standard OpenAI chat.completions request body over
-plain HTTP (via `requests`, already in requirements.txt) so it doesn't
-depend on the `openai` package.
+SageMaker. Sends a standard Chat Completions-style request body over plain
+HTTP (via `requests`, already in requirements.txt) so this script doesn't
+depend on any particular client library.
 
 Use this alongside test_endpoint_direct.py to isolate failures: if the
 direct script works but this one doesn't, the problem is in
@@ -15,10 +15,10 @@ Usage:
     python scripts/test_endpoint_via_api.py  # reads API_GATEWAY_URL from .env
 
 ---
-Equivalent using the actual OpenAI SDK -- this is the real point of this
-repo (any app using the OpenAI SDK can point `base_url` at your deployment
-with zero other code changes). Not run by this script (keeps `openai` out
-of requirements.txt for this experiment), but this is literally it:
+If your app happens to already be built on the OpenAI SDK, this is the
+real point of this repo -- point `base_url` at your deployment and nothing
+else in the app needs to change. Not run by this script (keeps `openai`
+out of requirements.txt for this experiment), but this is literally it:
 
     pip install openai
     from openai import OpenAI

@@ -8,12 +8,23 @@ generated through that path, regardless of what the Lambda itself does.
 
 To get real token-by-token streaming, the path is:
 
-    OpenAI SDK (stream=True)
+    Chat Completions-style client (stream=True)
         -> Lambda Function URL (InvokeMode=RESPONSE_STREAM)   <-- NOT API Gateway
         -> this Lambda, writing SSE chunks as they arrive
         -> sagemaker-runtime InvokeEndpointWithResponseStream  <-- NOT InvokeEndpoint
         -> DJL/LMI container (OPTION_ROLLING_BATCH=vllm streams tokens as
            they're generated when invoked via the streaming API)
+
+If the calling app happens to be using the OpenAI SDK, this is what it's
+sending/expecting at each end of that path -- shown here since it's the
+most common client people already have installed, not because the
+protocol is OpenAI-specific:
+
+    for chunk in client.chat.completions.create(model="...", messages=[...], stream=True):
+        print(chunk.choices[0].delta.content or "", end="")
+    # each `chunk` on the wire is exactly one line from
+    # lmi_chunk_to_chat_stream_chunk() below, and the loop ends on the
+    # `data: [DONE]` line from sse_done_line().
 
 Two things worth flagging honestly rather than guessing at exact current
 syntax, since both are runtime/version-sensitive:
@@ -38,16 +49,16 @@ syntax, since both are runtime/version-sensitive:
 2. The exact JSON shape DJL/LMI emits per streamed chunk under
    OPTION_ROLLING_BATCH=vllm (token-by-token JSON lines vs. SSE-framed
    `data: {...}` vs. something else) is container-version-dependent.
-   `_lmi_chunk_to_openai_sse_chunk()` below assumes an OpenAI-delta-shaped
+   `lmi_chunk_to_chat_stream_chunk()` below assumes a delta-shaped
    per-token JSON object (`{"choices": [{"delta": {"content": "..."}, ...}]}`)
    because that's what recent LMI chat-schema streaming responses use --
    confirm against a real invoke_endpoint_with_response_stream() response
    for your pinned container version before relying on it.
 
 What IS implemented and unit-tested below: the pure translation of one
-already-parsed LMI stream chunk into an OpenAI `chat.completion.chunk` SSE
-line, since that logic doesn't depend on any of the above and is worth
-having ready. See tests/test_streaming_handler.py.
+already-parsed LMI stream chunk into a Chat Completions-style
+`chat.completion.chunk` SSE line, since that logic doesn't depend on any
+of the above and is worth having ready. See tests/test_streaming_handler.py.
 """
 from __future__ import annotations
 
@@ -55,7 +66,7 @@ import json
 from typing import Optional
 
 
-def lmi_chunk_to_openai_sse_chunk(
+def lmi_chunk_to_chat_stream_chunk(
     lmi_chunk: dict,
     *,
     request_id: str,
@@ -63,8 +74,8 @@ def lmi_chunk_to_openai_sse_chunk(
     created: int,
     finish_reason: Optional[str] = None,
 ) -> str:
-    """Translate one streamed LMI/vLLM chunk into a single OpenAI-compatible
-    Server-Sent Event line: `data: {...}\\n\\n`.
+    """Translate one streamed LMI/vLLM chunk into a single Chat
+    Completions-style Server-Sent Event line: `data: {...}\\n\\n`.
 
     lmi_chunk is expected to look like:
         {"choices": [{"delta": {"content": "some token(s)"}, "index": 0}]}
@@ -91,9 +102,9 @@ def lmi_chunk_to_openai_sse_chunk(
     return f"data: {json.dumps(payload)}\n\n"
 
 
-def openai_sse_done_line() -> str:
-    """The terminal line the OpenAI streaming protocol expects after the
-    last content chunk."""
+def sse_done_line() -> str:
+    """The terminal line the Chat Completions streaming protocol expects
+    after the last content chunk."""
     return "data: [DONE]\n\n"
 
 
@@ -113,7 +124,7 @@ def openai_sse_done_line() -> str:
 # @app.post("/v1/chat/completions")
 # async def chat_completions(request: Request):
 #     body = await request.json()
-#     lmi_payload = {...}  # reuse openai_request_to_lmi_payload() from handler.py,
+#     lmi_payload = {...}  # reuse chat_request_to_lmi_payload() from handler.py,
 #                           # minus the `stream: true` rejection
 #     request_id, created = uuid.uuid4().hex, int(time.time())
 #
@@ -125,10 +136,10 @@ def openai_sse_done_line() -> str:
 #         )
 #         for event in resp["Body"]:
 #             chunk = json.loads(event["PayloadPart"]["Bytes"])
-#             yield lmi_chunk_to_openai_sse_chunk(
+#             yield lmi_chunk_to_chat_stream_chunk(
 #                 chunk, request_id=request_id, model=body.get("model", ""), created=created
 #             )
-#         yield openai_sse_done_line()
+#         yield sse_done_line()
 #
 #     return StreamingResponse(event_stream(), media_type="text/event-stream")
 #

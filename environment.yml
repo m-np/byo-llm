@@ -1,0 +1,23 @@
+# Conda environment for running/testing this repo.
+#
+#   conda env create -f environment.yml
+#   conda activate byo-llm
+#
+# Installs everything in requirements-dev.txt (which itself pulls in
+# requirements.txt) via pip inside the conda env, so there's one source of
+# truth for versions -- update requirements*.txt, not this file, when
+# bumping a dependency.
+#
+# To update an existing env after changing requirements*.txt:
+#   conda env update -f environment.yml --prune
+#
+# To remove it:
+#   conda env remove -n byo-llm
+name: byo-llm
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -r requirements-dev.txt

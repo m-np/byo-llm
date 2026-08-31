@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Minimal, plain-boto3 infra setup for the OpenAI-compatible adapter: an IAM
+Minimal, plain-boto3 infra setup for the Chat Completions-style adapter: an IAM
 role scoped to one SageMaker endpoint, the Lambda function (lambda/handler.py),
 and an HTTP API (API Gateway v2) route `POST /v1/chat/completions` in front
 of it.
@@ -44,9 +44,9 @@ from config import AWS_REGION, get_model  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HANDLER_FILE = REPO_ROOT / "lambda" / "handler.py"
 
-FUNCTION_NAME = "openai-adapter-chat-completions"
-ROLE_NAME = "openai-adapter-lambda-role"
-API_NAME = "openai-adapter-http-api"
+FUNCTION_NAME = "chat-completions-adapter"
+ROLE_NAME = "chat-adapter-lambda-role"
+API_NAME = "chat-adapter-http-api"
 ROUTE = "POST /v1/chat/completions"
 ROUTE_PATH = ROUTE.split(" ", 1)[1]
 
@@ -106,7 +106,7 @@ def create_or_update_role(iam_client, account_id: str, region: str, endpoint_nam
 
     iam_client.put_role_policy(
         RoleName=ROLE_NAME,
-        PolicyName="openai-adapter-scoped-permissions",
+        PolicyName="chat-adapter-scoped-permissions",
         PolicyDocument=json.dumps(permissions_policy),
     )
 
@@ -146,7 +146,7 @@ def _create_with_retry(lambda_client, role_arn: str, env: dict, zip_bytes: bytes
                 Timeout=LAMBDA_TIMEOUT_S,
                 MemorySize=LAMBDA_MEMORY_MB,
                 Environment=env,
-                Description="OpenAI chat.completions <-> SageMaker adapter (byo-llm repo)",
+                Description="Chat Completions-style <-> SageMaker adapter (byo-llm repo)",
             )
             return
         except ClientError as e:
@@ -265,7 +265,9 @@ def main(argv=None) -> int:
     api_endpoint = create_or_update_http_api(apigw_client, lambda_client, function_arn, args.region, account_id)
 
     print("\n✅ Done.")
-    print(f"OpenAI SDK base_url:  {api_endpoint}/v1")
+    print(f"base_url:  {api_endpoint}/v1")
+    # If your app uses the OpenAI SDK: OpenAI(base_url=f"{api_endpoint}/v1", api_key="unused")
+    # -- works unmodified since the JSON shape matches what that client expects.
     print(f"Full route:           {api_endpoint}{ROUTE_PATH}")
     print(f"\nTest it with: python scripts/test_endpoint_via_api.py --url {api_endpoint}{ROUTE_PATH}")
     return 0

@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lambda"))
 import handler  # noqa: E402
 
 
-# ---- openai_request_to_lmi_payload ----------------------------------------
+# ---- chat_request_to_lmi_payload ----------------------------------------
 
 
 def test_request_translation_basic_passthrough():
@@ -29,7 +29,7 @@ def test_request_translation_basic_passthrough():
         "temperature": 0.7,
         "max_tokens": 100,
     }
-    payload = handler.openai_request_to_lmi_payload(body)
+    payload = handler.chat_request_to_lmi_payload(body)
     assert payload["messages"] == body["messages"]
     assert payload["temperature"] == 0.7
     assert payload["max_tokens"] == 100
@@ -37,17 +37,17 @@ def test_request_translation_basic_passthrough():
 
 def test_request_translation_applies_default_max_tokens_when_absent():
     body = {"messages": [{"role": "user", "content": "hi"}]}
-    payload = handler.openai_request_to_lmi_payload(body)
+    payload = handler.chat_request_to_lmi_payload(body)
     assert payload["max_tokens"] == handler.DEFAULT_MAX_TOKENS
 
 
 def test_request_translation_drops_unsupported_fields():
     body = {
         "messages": [{"role": "user", "content": "hi"}],
-        "user": "some-user-id",  # OpenAI field, not forwarded
+        "user": "some-user-id",  # common in Chat Completions-style requests, not forwarded
         "logit_bias": {"123": 1},  # not in _FORWARDED_PARAMS
     }
-    payload = handler.openai_request_to_lmi_payload(body)
+    payload = handler.chat_request_to_lmi_payload(body)
     assert "user" not in payload
     assert "logit_bias" not in payload
 
@@ -60,7 +60,7 @@ def test_request_translation_forwards_known_generation_params():
         "stop": ["\n"],
         "seed": 42,
     }
-    payload = handler.openai_request_to_lmi_payload(body)
+    payload = handler.chat_request_to_lmi_payload(body)
     assert payload["top_p"] == 0.9
     assert payload["n"] == 2
     assert payload["stop"] == ["\n"]
@@ -68,36 +68,36 @@ def test_request_translation_forwards_known_generation_params():
 
 
 def test_request_translation_raises_on_missing_messages():
-    with pytest.raises(handler.OpenAIError) as exc_info:
-        handler.openai_request_to_lmi_payload({})
+    with pytest.raises(handler.ChatAPIError) as exc_info:
+        handler.chat_request_to_lmi_payload({})
     assert exc_info.value.param == "messages"
     assert exc_info.value.status_code == 400
 
 
 def test_request_translation_raises_on_empty_messages_array():
-    with pytest.raises(handler.OpenAIError):
-        handler.openai_request_to_lmi_payload({"messages": []})
+    with pytest.raises(handler.ChatAPIError):
+        handler.chat_request_to_lmi_payload({"messages": []})
 
 
 def test_request_translation_raises_on_stream_true():
-    with pytest.raises(handler.OpenAIError) as exc_info:
-        handler.openai_request_to_lmi_payload(
+    with pytest.raises(handler.ChatAPIError) as exc_info:
+        handler.chat_request_to_lmi_payload(
             {"messages": [{"role": "user", "content": "hi"}], "stream": True}
         )
     assert exc_info.value.param == "stream"
 
 
 def test_request_translation_allows_stream_false():
-    payload = handler.openai_request_to_lmi_payload(
+    payload = handler.chat_request_to_lmi_payload(
         {"messages": [{"role": "user", "content": "hi"}], "stream": False}
     )
     assert "stream" not in payload  # not forwarded either way -- non-streaming container call
 
 
-# ---- lmi_response_to_openai -------------------------------------------------
+# ---- lmi_response_to_chat_completion -------------------------------------------
 
 
-def test_response_translation_openai_shaped_choices():
+def test_response_translation_chat_shaped_choices():
     sm_body = {
         "choices": [
             {
@@ -108,7 +108,7 @@ def test_response_translation_openai_shaped_choices():
         ],
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
     }
-    result = handler.lmi_response_to_openai(
+    result = handler.lmi_response_to_chat_completion(
         sm_body, request_id="abc123", model="qwen2.5-14b-awq", created=1700000000
     )
     assert result["id"] == "chatcmpl-abc123"
@@ -122,14 +122,14 @@ def test_response_translation_openai_shaped_choices():
 
 def test_response_translation_defaults_finish_reason_and_role_if_missing():
     sm_body = {"choices": [{"message": {"content": "hi"}}]}
-    result = handler.lmi_response_to_openai(sm_body, request_id="x", model="m", created=0)
+    result = handler.lmi_response_to_chat_completion(sm_body, request_id="x", model="m", created=0)
     assert result["choices"][0]["finish_reason"] == "stop"
     assert result["choices"][0]["message"]["role"] == "assistant"
 
 
 def test_response_translation_falls_back_on_legacy_generated_text_dict():
     sm_body = {"generated_text": "legacy style response"}
-    result = handler.lmi_response_to_openai(sm_body, request_id="x", model="m", created=0)
+    result = handler.lmi_response_to_chat_completion(sm_body, request_id="x", model="m", created=0)
     assert result["choices"][0]["message"]["content"] == "legacy style response"
     assert result["choices"][0]["finish_reason"] == "stop"
     assert result["usage"]["total_tokens"] is None
@@ -137,13 +137,13 @@ def test_response_translation_falls_back_on_legacy_generated_text_dict():
 
 def test_response_translation_falls_back_on_legacy_generated_text_list():
     sm_body = [{"generated_text": "first"}, {"generated_text": "second"}]
-    result = handler.lmi_response_to_openai(sm_body, request_id="x", model="m", created=0)
+    result = handler.lmi_response_to_chat_completion(sm_body, request_id="x", model="m", created=0)
     assert len(result["choices"]) == 2
     assert result["choices"][0]["message"]["content"] == "first"
     assert result["choices"][1]["message"]["content"] == "second"
 
 
-# ---- sagemaker_error_to_openai_error ---------------------------------------
+# ---- sagemaker_error_to_chat_error ------------------------------------------
 
 
 def _client_error(code: str, message: str = "boom") -> ClientError:
@@ -151,25 +151,25 @@ def _client_error(code: str, message: str = "boom") -> ClientError:
 
 
 def test_error_translation_model_error_maps_to_502():
-    status, body = handler.sagemaker_error_to_openai_error(_client_error("ModelError"))
+    status, body = handler.sagemaker_error_to_chat_error(_client_error("ModelError"))
     assert status == 502
     assert body["error"]["code"] == "model_error"
 
 
 def test_error_translation_validation_exception_maps_to_400():
-    status, body = handler.sagemaker_error_to_openai_error(_client_error("ValidationException"))
+    status, body = handler.sagemaker_error_to_chat_error(_client_error("ValidationException"))
     assert status == 400
     assert body["error"]["type"] == "invalid_request_error"
 
 
 def test_error_translation_throttling_maps_to_429():
-    status, body = handler.sagemaker_error_to_openai_error(_client_error("ThrottlingException"))
+    status, body = handler.sagemaker_error_to_chat_error(_client_error("ThrottlingException"))
     assert status == 429
     assert body["error"]["type"] == "rate_limit_error"
 
 
 def test_error_translation_unknown_code_maps_to_500():
-    status, body = handler.sagemaker_error_to_openai_error(_client_error("SomethingElse"))
+    status, body = handler.sagemaker_error_to_chat_error(_client_error("SomethingElse"))
     assert status == 500
     assert body["error"]["code"] == "SomethingElse"
 
@@ -222,7 +222,7 @@ def test_lambda_handler_happy_path(mock_sagemaker_runtime):
     assert body["choices"][0]["message"]["content"] == "Hi!"
     assert body["object"] == "chat.completion"
 
-    # Confirm the endpoint was invoked with a translated (not raw OpenAI) payload
+    # Confirm the endpoint was invoked with the translated LMI payload, not the raw request body
     call_kwargs = mock_sagemaker_runtime.invoke_endpoint.call_args.kwargs
     assert call_kwargs["EndpointName"] == "test-endpoint"
     sent_payload = json.loads(call_kwargs["Body"])

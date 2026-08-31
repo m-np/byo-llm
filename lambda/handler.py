@@ -1,17 +1,25 @@
 """
-OpenAI chat.completions <-> SageMaker DJL/LMI (vLLM) translation, plus the
-Lambda entrypoint that wires it to one specific SageMaker endpoint.
+Chat Completions-style request/response translation, plus the Lambda
+entrypoint that wires it to one specific SageMaker endpoint.
 
-Deliberately split: the translation functions below (openai_request_to_lmi_payload,
-lmi_response_to_openai, sagemaker_error_to_openai_error) are pure -- no boto3,
-no AWS calls -- so tests/test_handler.py can exercise them directly and
-exhaustively without touching real infrastructure. Only lambda_handler()
-itself calls boto3, and that's mocked in tests too (see
+"Chat Completions-style" means: a `{"messages": [{"role": ..., "content": ...}], ...}`
+request in, a `{"choices": [{"message": {...}, "finish_reason": ...}], "usage": {...}}`
+response out. That shape isn't invented here -- it's the same one used by
+most hosted chat-model APIs, which is what makes this adapter a drop-in
+`base_url` swap for apps already built against one of them (see the
+comment above each translation call below for exactly what that swap looks
+like).
+
+Deliberately split: the translation functions below (chat_request_to_lmi_payload,
+lmi_response_to_chat_completion, sagemaker_error_to_chat_error) are pure --
+no boto3, no AWS calls -- so tests/test_handler.py can exercise them
+directly and exhaustively without touching real infrastructure. Only
+lambda_handler() itself calls boto3, and that's mocked in tests too (see
 test_lambda_handler_* in tests/test_handler.py).
 
-v1 is non-streaming only. A `stream: true` request gets a clean 400
-OpenAI-style error rather than being silently ignored -- see
-streaming_handler.py for the planned Function URL streaming path.
+v1 is non-streaming only. A `stream: true` request gets a clean 400 error
+rather than being silently ignored -- see streaming_handler.py for the
+planned Function URL streaming path.
 """
 from __future__ import annotations
 
@@ -29,10 +37,10 @@ SAGEMAKER_ENDPOINT_NAME = os.environ.get("SAGEMAKER_ENDPOINT_NAME", "")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 DEFAULT_MAX_TOKENS = int(os.environ.get("DEFAULT_MAX_TOKENS", "512"))
 
-# OpenAI request fields forwarded as-is to the DJL/LMI vLLM chat schema,
-# which accepts a near-identical generation-params vocabulary when invoked
-# with a "messages" payload (see deploy.py's build_environment() /
-# OPTION_ROLLING_BATCH=vllm). Anything not in this set is dropped rather
+# Chat Completions-style request fields forwarded as-is to the DJL/LMI vLLM
+# chat schema, which accepts a near-identical generation-params vocabulary
+# when invoked with a "messages" payload (see deploy.py's build_environment()
+# / OPTION_ROLLING_BATCH=vllm). Anything not in this set is dropped rather
 # than forwarded, since the container rejects unrecognized fields.
 _FORWARDED_PARAMS = (
     "temperature",
@@ -56,9 +64,9 @@ def _get_client():
     return _sagemaker_runtime_client
 
 
-class OpenAIError(Exception):
-    """Raised for request-shape problems we want to report back as a proper
-    OpenAI-style {"error": {...}} JSON body instead of an unhandled 500."""
+class ChatAPIError(Exception):
+    """Raised for request-shape problems we want to report back as a
+    structured `{"error": {...}} JSON body instead of an unhandled 500."""
 
     def __init__(
         self,
@@ -74,7 +82,7 @@ class OpenAIError(Exception):
         self.error_type = error_type
         self.param = param
 
-    def to_openai_error_body(self) -> dict:
+    def to_error_body(self) -> dict:
         return {
             "error": {
                 "message": self.message,
@@ -85,14 +93,14 @@ class OpenAIError(Exception):
         }
 
 
-def openai_request_to_lmi_payload(body: dict) -> dict:
-    """Translate an OpenAI POST /v1/chat/completions request body into the
-    payload the DJL/LMI vLLM container expects."""
+def chat_request_to_lmi_payload(body: dict) -> dict:
+    """Translate a Chat Completions-style request body into the payload the
+    DJL/LMI vLLM container expects."""
     if "messages" not in body or not isinstance(body["messages"], list) or not body["messages"]:
-        raise OpenAIError("'messages' is required and must be a non-empty array.", param="messages")
+        raise ChatAPIError("'messages' is required and must be a non-empty array.", param="messages")
 
     if body.get("stream"):
-        raise OpenAIError(
+        raise ChatAPIError(
             "Streaming is not supported by this endpoint (v1 is non-streaming only). "
             "See lambda/streaming_handler.py for the planned Function URL streaming path.",
             param="stream",
@@ -108,15 +116,15 @@ def openai_request_to_lmi_payload(body: dict) -> dict:
     return payload
 
 
-def lmi_response_to_openai(sm_body: dict, *, request_id: str, model: str, created: int) -> dict:
-    """Translate a DJL/LMI (vLLM, chat schema) response into an OpenAI
-    ChatCompletion response object.
+def lmi_response_to_chat_completion(sm_body: dict, *, request_id: str, model: str, created: int) -> dict:
+    """Translate a DJL/LMI (vLLM, chat schema) response into a Chat
+    Completions-style response object.
 
     Handles two response shapes:
       1. The expected shape when invoked with a "messages" payload under
-         OPTION_ROLLING_BATCH=vllm: already close to OpenAI's own
+         OPTION_ROLLING_BATCH=vllm: already close to the target
          `choices[].message` structure -- we normalize the envelope fields
-         (id/object/created/model) LMI doesn't set the OpenAI way.
+         (id/object/created/model) LMI sets differently.
       2. A defensive fallback for older/non-chat LMI response shapes
          ({"generated_text": "..."} or a list of those), wrapped into a
          synthetic single choice so this degrades gracefully instead of
@@ -161,8 +169,8 @@ def lmi_response_to_openai(sm_body: dict, *, request_id: str, model: str, create
     }
 
 
-def sagemaker_error_to_openai_error(err: ClientError) -> tuple[int, dict]:
-    """Map a boto3 SageMaker Runtime ClientError to (http_status, openai_error_body)."""
+def sagemaker_error_to_chat_error(err: ClientError) -> tuple[int, dict]:
+    """Map a boto3 SageMaker Runtime ClientError to (http_status, error_body)."""
     code = err.response.get("Error", {}).get("Code", "")
     message = err.response.get("Error", {}).get("Message", str(err))
 
@@ -203,16 +211,26 @@ def lambda_handler(event, context):
         raw_body = event.get("body") or "{}"
         if event.get("isBase64Encoded"):
             raw_body = base64.b64decode(raw_body).decode("utf-8")
-        openai_request = json.loads(raw_body)
+        chat_request = json.loads(raw_body)
     except (json.JSONDecodeError, TypeError, ValueError):
-        return _proxy_response(400, OpenAIError("Request body is not valid JSON.").to_openai_error_body())
+        return _proxy_response(400, ChatAPIError("Request body is not valid JSON.").to_error_body())
 
+    # ---- Equivalent client-side call, if you're using the OpenAI SDK against
+    # this Lambda's URL (any client that speaks Chat Completions works the
+    # same way -- this isn't OpenAI-specific plumbing, just the most common
+    # client people already have installed):
+    #
+    #   from openai import OpenAI
+    #   client = OpenAI(base_url="<this API's base URL>/v1", api_key="unused")
+    #   client.chat.completions.create(model="...", messages=[...])
+    #
+    # `chat_request` here is exactly the JSON body that call sends.
     try:
-        lmi_payload = openai_request_to_lmi_payload(openai_request)
-    except OpenAIError as e:
-        return _proxy_response(e.status_code, e.to_openai_error_body())
+        lmi_payload = chat_request_to_lmi_payload(chat_request)
+    except ChatAPIError as e:
+        return _proxy_response(e.status_code, e.to_error_body())
 
-    model_name = openai_request.get("model", SAGEMAKER_ENDPOINT_NAME)
+    model_name = chat_request.get("model", SAGEMAKER_ENDPOINT_NAME)
     request_id = uuid.uuid4().hex
     created = int(time.time())
 
@@ -225,10 +243,23 @@ def lambda_handler(event, context):
         )
         sm_body = json.loads(sm_response["Body"].read())
     except ClientError as e:
-        status_code, error_body = sagemaker_error_to_openai_error(e)
+        # ---- If you're using the OpenAI SDK client-side, a non-2xx response
+        # here surfaces as an `openai.APIError` (or a subclass, e.g.
+        # `openai.RateLimitError` for our 429s) raised from
+        # client.chat.completions.create(...) -- same as it would for a real
+        # OpenAI outage/error, so existing try/except error handling in
+        # calling code doesn't need to change either.
+        status_code, error_body = sagemaker_error_to_chat_error(e)
         return _proxy_response(status_code, error_body)
 
-    openai_response = lmi_response_to_openai(
+    # ---- Equivalent client-side read, if you're using the OpenAI SDK:
+    #
+    #   resp = client.chat.completions.create(...)
+    #   resp.choices[0].message.content
+    #
+    # `chat_response` below is exactly the JSON body that .create(...) call
+    # parses into that `resp` object.
+    chat_response = lmi_response_to_chat_completion(
         sm_body, request_id=request_id, model=model_name, created=created
     )
-    return _proxy_response(200, openai_response)
+    return _proxy_response(200, chat_response)

@@ -45,8 +45,8 @@ def main(argv=None) -> int:
     endpoint_name = args.endpoint_name or get_model(args.model).endpoint_name
 
     # Raw payload the DJL/LMI (vLLM chat schema) container expects directly
-    # -- this is what handler.py's openai_request_to_lmi_payload() produces
-    # from an OpenAI-shaped request. Sending it here bypasses that
+    # -- this is what handler.py's chat_request_to_lmi_payload() produces
+    # from a Chat Completions-style request. Sending it here bypasses that
     # translation on purpose.
     payload = {
         "messages": [{"role": "user", "content": args.prompt}],
