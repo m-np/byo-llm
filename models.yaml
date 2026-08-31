@@ -1,0 +1,71 @@
+# Model registry for deploy.py / teardown.py / autoscale.py
+#
+# Add a new model by adding an entry here — no code changes needed.
+# `deploy.py --model <key>` looks up `key` in this file.
+#
+# Fields:
+#   hf_model_id             Hugging Face repo id, downloaded by the DJL/LMI
+#                            container at container-start time.
+#   instance_type            SageMaker real-time inference instance type.
+#   tensor_parallel_degree   Number of GPUs to shard the model across
+#                            (must be <= GPUs on instance_type).
+#   max_model_len            Max context length (prompt + completion) vLLM
+#                            will allocate KV cache for. Larger = more VRAM
+#                            reserved per request slot, fewer concurrent
+#                            requests fit.
+#   quantize                 null | "awq" | "gptq" | "fp8" — passed to vLLM
+#                            via OPTION_QUANTIZE. Only set this if the HF
+#                            repo actually contains quantized weights in
+#                            that format (e.g. an "-AWQ" repo).
+#   requires_hf_token        true if the HF repo is gated and needs HF_TOKEN
+#                            set in .env to download.
+#   default                  true on exactly one entry; used when
+#                            deploy.py/teardown.py are run without --model.
+#   note                     short human-readable VRAM/cost tradeoff summary.
+
+models:
+
+  qwen2.5-14b-awq:
+    hf_model_id: Qwen/Qwen2.5-14B-Instruct-AWQ
+    instance_type: ml.g5.2xlarge
+    tensor_parallel_degree: 1
+    max_model_len: 8192
+    quantize: awq
+    requires_hf_token: false
+    default: true
+    note: >
+      4-bit AWQ quantized 14B model. Weights are ~8GB, comfortably fits with
+      KV cache on a single A10G (24GB VRAM) at g5.2xlarge. Best quality-per-
+      dollar of the three entries here for a single-GPU deployment; the
+      tradeoff is AWQ has a small quality hit vs. full-precision and slightly
+      slower prefill than an unquantized model of the same size on hardware
+      with idle VRAM to spare. Default for this experiment.
+
+  mistral-7b-instruct:
+    hf_model_id: mistralai/Mistral-7B-Instruct-v0.3
+    instance_type: ml.g5.2xlarge
+    tensor_parallel_degree: 1
+    max_model_len: 32768
+    quantize: null
+    requires_hf_token: false
+    note: >
+      Full bf16 precision, ~15GB weights, fits on g5.2xlarge with room for a
+      much larger KV cache than the 14B model (hence the larger
+      max_model_len). Ungated on HF — no token needed. Cheapest capable
+      baseline; use this to sanity-check the pipeline or when 32k context
+      matters more than raw model size.
+
+  llama-3.1-8b-instruct:
+    hf_model_id: meta-llama/Llama-3.1-8B-Instruct
+    instance_type: ml.g5.2xlarge
+    tensor_parallel_degree: 1
+    max_model_len: 8192
+    quantize: null
+    requires_hf_token: true
+    note: >
+      Full bf16 precision, ~16GB weights, fits on g5.2xlarge. GATED on
+      Hugging Face — you must accept Meta's license on the model page and
+      set HF_TOKEN in .env to an HF token with access, or the container will
+      fail to download weights and the endpoint will never reach InService.
+      Similar cost/VRAM profile to Mistral-7B; kept here for quality
+      comparison against Qwen/Mistral, not as the default.
